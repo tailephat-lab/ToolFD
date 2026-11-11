@@ -1,13 +1,11 @@
 name: Run Autobot WMS (Continuous Loop)
 
 on:
-  workflow_dispatch: # Chỉ chạy khi ný bấm nút 'Run workflow' trên giao diện GitHub
+  workflow_dispatch: # Bấm nút 'Run workflow' trên GitHub để kích hoạt
 
 jobs:
   run-autobot:
-    # Nếu dùng Self-Hosted Runner (máy cty) thì sửa thành: runs-on: self-hosted
-    # Nếu thử nghiệm trên Cloud GitHub thì để: runs-on: ubuntu-latest
-    runs-on: ubuntu-latest
+    runs-on: self-hosted # Đã chuyển sang chạy trực tiếp trên máy tính công ty
 
     steps:
       - name: Lấy mã nguồn từ Repository
@@ -24,5 +22,5 @@ jobs:
           pip install pandas requests openpyxl gspread oauth2client aiohttp playwright selenium
           playwright install chromium
 
-      - name: Chạy script Trick.py (Ngâm vòng lặp)
+      - name: Chạy script Trick.py
         run: python Trick.py
