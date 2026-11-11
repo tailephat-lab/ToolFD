@@ -18,15 +18,19 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 
 # ==============================================================================
-# CẤU HÌNH BIẾN & ĐƯỜNG DẪN (C:\Autobot)
+# CẤU HÌNH BIẾN & ĐƯỜNG DẪN LINH HOẠT (TƯƠNG THÍCH LINUX/CLOUD)
 # ==============================================================================
 SPREADSHEET_ID = "1H-i84gKoRF6_MYqJbwnx6jBqCwvy77EWHti3KF6OngU"
 
-BASE_DIR = r"C:\Autobot"
+# Tự động lấy đường dẫn thư mục hiện tại của file Python
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json")
 
-CHROME_PROFILE_SELENIUM = r"user-data-dir=C:\Users\SRVN1190\AppData\Local\Google\Chrome\User Data\Profile_Auto"
-CHROME_PROFILE_PLAYWRIGHT = r"C:\ChromeDebug"
+# Tạo thư mục Chrome profile tạm thời trên Server nếu chạy trên Cloud
+PLAYWRIGHT_PROFILE_DIR = os.path.join(BASE_DIR, "chrome_profile_playwright")
+SELENIUM_PROFILE_DIR = os.path.join(BASE_DIR, "chrome_profile_selenium")
+os.makedirs(PLAYWRIGHT_PROFILE_DIR, exist_ok=True)
+os.makedirs(SELENIUM_PROFILE_DIR, exist_ok=True)
 
 SHOPEE_OPS_URL = "https://ops.ssc.shopeemobile.com/oms/parcelCenter/parcel?_p_=fbs&_c_=VN"
 SPX_BASE_URL = "https://spx.shopee.vn/#/orderTracking"
@@ -125,7 +129,7 @@ def check_and_ensure_login(driver):
 
     final_url = driver.current_url.lower()
     if any(k in final_url for k in ["login", "sso", "accounts.shopee.com"]):
-        raise Exception("Tự động Log In thất bại! Vui lòng kiểm tra lại tài khoản Chrome Profile.")
+        raise Exception("Tự động Log In thất bại! Vui lòng kiểm tra lại tài khoản Cookie / Session WMS.")
 
 
 def fetch_report_df_via_browser(driver, task_type, extra_data_payload):
@@ -267,7 +271,7 @@ async def process_ops_fetching(context, tracking_codes):
 
 
 # ==============================================================================
-# BƯỚC 4: SPX EXPRESS - BÓC TÁCH ĐỆ QUY CHILDREN TỪ NOTE_4.TXT
+# BƯỚC 4: SPX EXPRESS - BÓC TÁCH ĐỆ QUY CHILDREN
 # ==============================================================================
 def _extract_stations_from_path(path_obj):
     stations = []
@@ -333,9 +337,6 @@ def _get_item_timestamp(item):
 
 
 def _flatten_tracking_events(items):
-    """
-    Đệ quy lấy toàn bộ sự kiện cha và sự kiện con nằm trong `children` (đặc thù note_4.txt)
-    """
     flat_list = []
     if not isinstance(items, list):
         return flat_list
@@ -388,7 +389,6 @@ async def fetch_spx_detail_aiohttp(session, tracking_no, headers):
                     track_data = res_track["data"]
                     raw_tracking_list = track_data.get("tracking_list") or []
                     
-                    # Quét sạch cả mảng children nằm bên trong
                     all_events = _flatten_tracking_events(raw_tracking_list)
 
                     if len(all_events) > 0:
@@ -509,7 +509,17 @@ async def process_spx_fetching(context, tracking_codes):
 def update_sheet_via_api(sheet_name, df, max_retries=5):
     print(f"-> [API Google Sheet] Đang đẩy dữ liệu vào tab '{sheet_name}'...")
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+
+    # Đọc credentials từ Secret của GitHub Actions hoặc file local
+    creds_env = os.environ.get("GSPREAD_CREDS")
+    if creds_env:
+        creds_dict = json.loads(creds_env)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    elif os.path.exists(CREDENTIALS_FILE):
+        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+    else:
+        raise Exception(f"Không tìm thấy file credentials tại {CREDENTIALS_FILE} và không có biến GSPREAD_CREDS!")
+
     client = gspread.authorize(creds)
 
     df_clean = df.fillna("").astype(str)
@@ -523,7 +533,8 @@ def update_sheet_via_api(sheet_name, df, max_retries=5):
             sheet.update(range_name="A1", values=data_to_push, value_input_option="USER_ENTERED")
             print(f" => [THÀNH CÔNG] Đã cập nhật xong tab '{sheet_name}'!")
             return
-        except Exception:
+        except Exception as e:
+            print(f" ⚠️ Thử lại đẩy Google Sheet lần {attempt}/{max_retries}: {e}")
             time.sleep(4)
 
     raise Exception("Lỗi cập nhật Google Sheet!")
@@ -534,12 +545,11 @@ def update_sheet_via_api(sheet_name, df, max_retries=5):
 # ==============================================================================
 async def main_async_pipeline(df_merged):
     async with async_playwright() as p:
+        # Chạy Playwright ở chế độ Headless cho Server Cloud
         context = await p.chromium.launch_persistent_context(
-            user_data_dir=CHROME_PROFILE_PLAYWRIGHT,
-            headless=False,
-            channel="chrome",
-            args=["--start-maximized"],
-            ignore_default_args=["--enable-automation"]
+            user_data_dir=PLAYWRIGHT_PROFILE_DIR,
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
         )
 
         try:
@@ -577,7 +587,6 @@ async def main_async_pipeline(df_merged):
         is_cancelled = info.get("is_cancelled", False)
         latest_tag = info.get("latest_tag", "")
         latest_msg = info.get("latest_msg", "")
-        dest_hub = info.get("dest_hub", "")
 
         station_dict = {}
 
@@ -629,15 +638,17 @@ async def main_async_pipeline(df_merged):
 
 
 def run_continuous_loop():
-    print("\n🚀 KHỞI TRẠY TRÌNH DUYỆT CHROME XỬ LÝ VÒNG LẶP VÔ HẠN...")
+    print("\n🚀 KHỞI TRẠY TRÌNH DUYỆT CHROME HEADLESS XỬ LÝ VÒNG LẶP...")
     
+    # Cấu hình Selenium chạy Headless hoàn toàn trên GitHub Actions Server
     options = webdriver.ChromeOptions()
+    options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument(CHROME_PROFILE_SELENIUM)
+    options.add_argument("--disable-gpu")
+    options.add_argument(f"user-data-dir={SELENIUM_PROFILE_DIR}")
 
     driver = webdriver.Chrome(options=options)
-    driver.maximize_window()
 
     loop_count = 1
 
